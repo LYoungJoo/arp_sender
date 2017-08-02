@@ -3,6 +3,8 @@
 #include <pcap.h>
 #include <net/ethernet.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <arpa/inet.h>
 
 using namespace std;
 
@@ -14,7 +16,7 @@ struct eth {
 	void printSrcMAC(eth *eth_header){
 		cout << "Src MAC - ";
 		for(int i = 0; i < 6; ++i) {
-			printf("%02X", (int *)((*eth_header).srcmac[i]));
+			printf("%2X", ((*eth_header).srcmac[i]));
 			if ( i != 5)
 				printf(":");
 		}
@@ -24,7 +26,7 @@ struct eth {
 	void printDestMAC(eth *eth_header){
 		cout << "Dest MAC - ";
 		for(int i = 0; i < 6; ++i) {
-			printf("%02X", (int *)((*eth_header).destmac[i]));
+			printf("%02X", ((*eth_header).destmac[i]));
 			if ( i != 5)
 				printf(":");
 		}
@@ -33,8 +35,8 @@ struct eth {
 };
 
 struct sendingarp {
-    u_int8_t srcmac[6];
     u_int8_t destmac[6];
+    u_int8_t srcmac[6];
     u_int16_t type;
     u_int16_t hardware_type;
     u_int16_t protocol_type;
@@ -68,14 +70,29 @@ struct arp_s {
 
 };
 
-const char *getmac(char dev[20], char my_mac[20])
+struct char_mac { // transfer mac
+	char mac1[2];
+	char colon1;
+	char mac2[2];
+	char colon2;
+	char mac3[2];
+	char colon3;
+	char mac4[2];
+	char colon4;
+	char mac5[2];
+	char colon5;
+	char mac6[2];
+};
+
+void getmac(char dev[20], char my_mac[6])
 {
     FILE *fp;
     int state;
     char sum[200] = "ifconfig ";
-    char buff[17];
+    char buff[20];
     char tmp[20];
     char *ptr;
+	char_mac *macaddr;
 
 	
     strcpy(tmp,dev);
@@ -85,8 +102,19 @@ const char *getmac(char dev[20], char my_mac[20])
     fp = popen(sum, "r");
     fgets(buff, 19, fp);
 	strcpy(my_mac,buff);
-	return buff;
+
+	macaddr = (char_mac *)buff;
+	printf("MY MAC ADD : %s\n\n",macaddr->mac1);
+	my_mac[0] = strtol(macaddr->mac1, &ptr, 16);     
+	my_mac[1] = strtol(macaddr->mac2, &ptr, 16);     
+	my_mac[2] = strtol(macaddr->mac3, &ptr, 16);     
+	my_mac[3] = strtol(macaddr->mac4, &ptr, 16);     
+	my_mac[4] = strtol(macaddr->mac5, &ptr, 16);     
+	my_mac[5] = strtol(macaddr->mac6, &ptr, 16);     
+
+	return;
 }
+
 
 int main(int argc, char *argv[])
 {
@@ -101,55 +129,82 @@ int main(int argc, char *argv[])
 	struct pcap_pkthdr *header;	/* The header that pcap gives us */
 	const u_char *packet;		/* The actual packet */
 	bool chk;
-	char my_mac[20];
-	eth *eth_header;
-	arp_s *arp_header;
-	sendingarp *send_arp;
 
-	if( argc < 2 ){ 
+	char my_mac[6]; // save my_mac
+	eth *eth_header; // eth_header
+	arp_s *arp_header; // arp_header
+	sendingarp *send_arp; // arp_packet_str
+	char senderip[20], targetip[20];
+	const u_char *send_packet = (u_char *)malloc(60); // arp_packet
+
+	if( argc > 3 ){ 
 		dev = pcap_lookupdev(errbuf);
 		pcap_lookupnet(dev, &net, &mask, errbuf);
+
+		inet_pton(AF_INET, argv[2], senderip);
+		inet_pton(AF_INET, argv[3], targetip);
 	}
 	else {
-		dev = argv[1]; 
+		printf("argv error : ./arppac eth0 senderip targetip\n");
+		return 0;
 	}
+
 	getmac(dev, my_mac);
 	
 	handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
 	pcap_compile(handle, &fp, filter_exp, 0, net);
 	pcap_setfilter(handle, &fp);
 
-	
+
+//////////////// Make Arp Packet ////////////////
+
+	send_arp = (sendingarp *)send_packet;
+		
 	for(int i=0; i < 6; ++i)
 		send_arp->destmac[i] = 0xff;
-	send_arp->srcmac[0] = 0x12;
-	send_arp->srcmac[1] = 0x12;
-	send_arp->srcmac[2] = 0x12;
-	send_arp->srcmac[3] = 0x12;
-	send_arp->srcmac[4] = 0x12;
-	send_arp->srcmac[5] = 0x12;
-	send_arp->type = 0x0806;
+	for(int i=0; i < 6; ++i)
+		send_arp->srcmac[i] = my_mac[i]^0xffffff00;
 
+	send_arp->type = ntohs(0x0806);
+	send_arp->hardware_type = ntohs(0x01); // eth
+	send_arp->protocol_type = ntohs(0x0800); // ipv4
+	send_arp->hardware_len = 0x6;
+	send_arp->protocol_len = 0x4;
+	send_arp->operation_code = ntohs(0x1); // reqeust
 
-	//printf("%s",send_arp);
+	for(int i=0; i < 6; ++i)
+		send_arp->sender_mac[i] = my_mac[i]^0xffffff00;
 
-	pcap_sendpacket(handle,(const u_char *)send_arp,60);
+	for(int i=0; i < 6; ++i)
+		send_arp->sender_ip[i] = senderip[i]^0xffffff00;
 
-	while(0 <= (chk = pcap_next_ex(handle, &header, &packet)))
+	for(int i=0; i < 6; ++i)
+		send_arp->target_mac[i] = 0x00;
+
+	for(int i=0; i < 6; ++i)
+		send_arp->target_ip[i] = targetip[i]^0xffffff00;
+	
+////////////////////////////////////////////////////
+
+	for( int i = 0; i < 2000; ++i)
+		pcap_sendpacket(handle,(const u_char *)send_arp,60);
+
+	while(0 < (chk = pcap_next_ex(handle, &header, &packet)))
 	{
 		if (chk == 0)
 			continue;
 		else {
-			cout << "======================== PACKET ========================" << endl;
-			cout << "1) ETH HEADER" << endl;
 			eth_header = (eth *)packet;
-			eth_header->printSrcMAC(eth_header);
-			eth_header->printDestMAC(eth_header);
-
 			if ((*eth_header).type == ntohs(0x0806)) {
-				cout << "2) ARP HEADER" << endl;
 				arp_header = (arp_s*)(packet+14);
-				arp_header->printarp(arp_header);
+				if(arp_header->operation_code == ntohs(0x2)){
+					cout << "======================== PACKET ========================" << endl;
+					cout << "1) ETH HEADER" << endl;
+					eth_header->printSrcMAC(eth_header);
+					eth_header->printDestMAC(eth_header);
+					cout << "2) ARP HEADER" << endl;
+					arp_header->printarp(arp_header);
+				}
 				
 			}
 		}
